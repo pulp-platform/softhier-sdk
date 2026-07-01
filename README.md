@@ -8,81 +8,338 @@ The SDK includes the SoftHier software runtime headers, startup and linker files
 
 For more background, see the [PULP Platform](https://pulp-platform.org/index.html) project page and the [GVSoC repository](https://github.com/gvsoc/gvsoc).
 
----
+## 📍 Where This Fits
 
-## 🚀 Getting Started
-
-Follow these steps to set up and run your first SoftHier simulation:
-
-### 1️⃣ Set up the environment
-
-Initialize the SoftHier SDK environment:
-
-```bash
-source sourceme.sh
+```text
+gvsoc/
+├── pulp/pulp/chips/soft_hier_old/     # Legacy SoftHier GVSoC models
+├── soft_hier_sdk/                     # This SDK
+│   ├── sourceme.sh                    # Environment + SDK-local toolchain setup
+│   ├── softhier_old.mk                # Root make targets for SoftHier-old
+│   ├── runtime/                       # Legacy runtime and linker scripts
+│   ├── examples/SoftHier/             # Original example apps and arch configs
+│   ├── implementation/                # Kernel-generation flows and LLM kernels
+│   ├── utilities/                     # Arch/header/preload/perfetto utilities
+└── Makefile                           # Includes soft_hier_sdk/softhier_old.mk
 ```
 
----
+Run commands from the `gvsoc/` repository root unless a command explicitly uses
+`make -C soft_hier_sdk/implementation`.
 
-### 2️⃣ Integrate with GVSOC
+## ⚡ Quick Start
 
 Navigate to the root of your GVSOC repository and add the following line to your `Makefile`:
 
 ```makefile
-include $(SOFTHIER_SDK)/softhier.mk
+include soft_hier_sdk/softhier_old.mk
 ```
 
----
+Initialize the SoftHier SDK environment:
+```bash
+source soft_hier_sdk/sourceme.sh
+```
 
-### 3️⃣ Install toolchains
-
-Install all required third-party toolchains:
+Then build and run the default SoftHier example:
 
 ```bash
-make third_party/toolchain
+make sh-old-hs
+make sh-old-runv
 ```
 
-This target downloads and extracts the following third-party archives into `third_party/toolchain`:
+The default target is:
 
-- `v1.0.16-pulp-riscv-gcc-centos-7.tar.bz2` from `pulp-platform/pulp-riscv-gnu-toolchain`. This is a prebuilt RISC-V GNU compiler toolchain. Its upstream license file covers multiple components, including newlib under BSD-style terms and GCC/binutils/Linux headers under GNU GPL-family terms.
-- `toolchain.tar.xz` from `husterZC/gun_toolchain` release `v2.0.0`. This is a prebuilt GNU/RISC-V toolchain with vector and Float16 support. The upstream GitHub repository does not declare a repository-level license; review the license notices included in the downloaded archive before redistribution.
+```text
+pulp.chips.soft_hier_old.flex_cluster
+```
 
-These toolchains are not part of the SoftHier SDK license grant and remain under their respective upstream licenses.
+The default architecture config is:
 
----
+```text
+soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py
+```
 
-### 4️⃣ Build SoftHier hardware 🛠️
+The default application is:
+
+```text
+soft_hier_sdk/runtime/app_example
+```
+
+## 🏗️ Root Make Targets
+
+The root `Makefile` includes `soft_hier_sdk/softhier_old.mk`, which provides the legacy SoftHier
+flow with explicit `sh-old-*` targets.
+
+| Target | Purpose |
+| --- | --- |
+| `make sh-old-config` | Copy the selected arch config into the model tree and generate runtime arch headers. |
+| `make sh-old-hw` | Build the merged GVSoC SoftHier-old hardware target. |
+| `make sh-old-sw` | Build the selected SoftHier software app into `soft_hier_sdk/sw_build/softhier.elf`. |
+| `make sh-old-hs` | Build both hardware and software. |
+| `make sh-old-run` | Run with a focused RedMule trace for cluster 0. |
+| `make sh-old-runv` | Run with RedMule, iDMA, and cluster-register traces, saving `analyze_trace.txt`. |
+| `make sh-old-pfto` | Convert `analyze_trace.txt` to Perfetto JSON. |
+| `make sh-old-clean-sw` | Remove `soft_hier_sdk/sw_build`. |
+
+Useful make variables:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `cfg=...` | `soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py` | Architecture configuration. |
+| `app=...` | `soft_hier_sdk/runtime/app_example` | Software application directory. |
+| `core_model=fast` | `fast` | Core model selector: `fast` or `accurate`. |
+| `pld=...` | empty | Optional HBM preload ELF. |
+
+Example:
 
 ```bash
-make sh-hw
+make sh-old-hs \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py \
+  app=soft_hier_sdk/examples/SoftHier/software/gemm_systolic \
+  core_model=fast
+
+make sh-old-runv \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py \
+  core_model=fast
 ```
 
----
+## 🧠 Core Model Selection
 
-### 5️⃣ Build SoftHier software 💻
+SoftHier-old can run with either:
+
+| Mode | Use |
+| --- | --- |
+| `core_model=fast` | Fast Snitch model. This is the default and the recommended mode for long legacy apps. |
+| `core_model=accurate` | More detailed Snitch + FP subsystem path. Use for core-model debugging. |
+
+The selector is passed to GVSoC as:
+
+```text
+--core-model=fast
+```
+
+or:
+
+```text
+--core-model=accurate
+```
+
+## ✅ Verified Applications
+
+### 🟥 GEMM Systolic, NoC512
 
 ```bash
-make sh-sw
+source soft_hier_sdk/sourceme.sh
+
+make sh-old-hs \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py \
+  app=soft_hier_sdk/examples/SoftHier/software/gemm_systolic \
+  core_model=fast
+
+make sh-old-runv \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py \
+  core_model=fast
 ```
 
-📂 The default example application is located at:
-
-```
-<path/to/softhier-sdk>/sw/app_example
-```
-
----
-
-### 6️⃣ Run the simulation ▶️
+RedMule checkpoint:
 
 ```bash
-make sh-run
+rg -c "GEMM id" soft_hier_sdk/sw_build/analyze_trace.txt
+rg "GEMM id = 256|Performance Counter|Simulation stopped" soft_hier_sdk/sw_build/analyze_trace.txt
 ```
 
----
+A healthy full run should frequently print lines like:
 
-## 📜 License
+```text
+[LightRedmule] Finished : ... | GEMM id = ... | M-N-K = 256-256-256
+```
 
-Copyright ETH Zurich and University of Bologna 2026.
+### 🟥 GEMM Systolic, NoC1024
 
-The SoftHier SDK is licensed under the **Apache v2.0 license**. See the [`LICENSE`](./LICENSE) file for full details.
+```bash
+source soft_hier_sdk/sourceme.sh
+
+make sh-old-hs \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC1024.py \
+  app=soft_hier_sdk/examples/SoftHier/software/gemm_systolic \
+  core_model=fast
+
+make sh-old-runv \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC1024.py \
+  core_model=fast
+```
+
+Use the same RedMule checkpoint commands as NoC512.
+
+### 🟦 RMSNorm
+
+The RMSNorm flow lives under `soft_hier_sdk/implementation` because it generates kernel-specific
+headers and preload data before building the old app.
+
+```bash
+source soft_hier_sdk/sourceme.sh
+make -C soft_hier_sdk/implementation norm-runv
+```
+
+This uses:
+
+```text
+soft_hier_sdk/implementation/config/arch/arch.py
+soft_hier_sdk/implementation/config/kernels/norm.py
+soft_hier_sdk/implementation/sw/RMSNorm
+```
+
+Generated files:
+
+```text
+soft_hier_sdk/implementation/sw/RMSNorm/include/norm.h
+soft_hier_sdk/implementation/sw/RMSNorm/include/preload.h
+soft_hier_sdk/implementation/sw/RMSNorm/preload.elf
+```
+
+RMSNorm mainly exercises iDMA and vector instructions, not the RedMule GEMM datapath.
+
+## 🧪 Trace And Perfetto Flow
+
+Run a verbose trace:
+
+```bash
+make sh-old-runv \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py \
+  core_model=fast
+```
+
+Trace output:
+
+```text
+soft_hier_sdk/sw_build/analyze_trace.txt
+```
+
+Convert to Perfetto:
+
+```bash
+make sh-old-pfto
+```
+
+Generated files:
+
+```text
+soft_hier_sdk/sw_build/roi.json
+soft_hier_sdk/sw_build/perfetto.json
+```
+
+## 🧬 Architecture And Kernel Configuration
+
+Architecture configs define cluster count, core count, TCDM, HBM layout, NoC width, Spatz attachment,
+RedMule shape, and synchronization ranges.
+
+Common configs:
+
+```text
+soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py
+soft_hier_sdk/examples/SoftHier/config/arch_NoC1024.py
+soft_hier_sdk/implementation/config/arch/arch.py
+```
+
+Kernel configs for the implementation flow:
+
+```text
+soft_hier_sdk/implementation/config/kernels/attn.py
+soft_hier_sdk/implementation/config/kernels/gemm.py
+soft_hier_sdk/implementation/config/kernels/norm.py
+soft_hier_sdk/implementation/config/kernels/acti.py
+```
+
+The implementation Makefile supports:
+
+```bash
+make -C soft_hier_sdk/implementation attn-run
+make -C soft_hier_sdk/implementation gemm-run
+make -C soft_hier_sdk/implementation norm-run
+make -C soft_hier_sdk/implementation acti-run
+```
+
+Use `*-runv` for verbose traces.
+
+## 🧹 Cleaning
+
+Remove the root software build:
+
+```bash
+make sh-old-clean-sw
+```
+
+Remove generated implementation-kernel files:
+
+```bash
+make -C soft_hier_sdk/implementation norm-clean
+make -C soft_hier_sdk/implementation gemm-clean
+make -C soft_hier_sdk/implementation attn-clean
+make -C soft_hier_sdk/implementation acti-clean
+```
+
+The SDK-local toolchain is intentionally not removed by these commands.
+
+## 🛠️ Troubleshooting
+
+### Compiler is not SDK-local
+
+Check:
+
+```bash
+source soft_hier_sdk/sourceme.sh
+which riscv32-unknown-elf-gcc
+```
+
+Expected:
+
+```text
+.../soft_hier_sdk/toolchain/install/bin/riscv32-unknown-elf-gcc
+```
+
+If the compiler is missing, check that the old-release archive exists:
+
+```text
+../soft_hier_release/third_party/toolchain/toolchain.tar.xz
+```
+
+### RedMule trace is silent
+
+For GEMM, the correct run should frequently emit:
+
+```text
+[LightRedmule] Finished : ... GEMM id = ...
+```
+
+If not, verify:
+
+1. The app is `soft_hier_sdk/examples/SoftHier/software/gemm_systolic`.
+2. The command used `make sh-old-runv` or explicitly enabled a RedMule trace.
+3. The architecture config was copied through `make sh-old-config` or any target depending on it.
+4. The binary was rebuilt after changing `cfg` or `app`.
+
+### Build uses stale software
+
+Rebuild software explicitly:
+
+```bash
+make sh-old-sw \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py \
+  app=soft_hier_sdk/examples/SoftHier/software/gemm_systolic
+```
+
+### RMSNorm headers are missing
+
+Use the implementation Makefile; it generates `norm.h`, `preload.h`, and `preload.elf` before build:
+
+```bash
+make -C soft_hier_sdk/implementation norm-pre
+```
+
+## 📌 Notes For Maintainers
+
+- Keep old application source code unchanged when validating the merge.
+- Keep SoftHier-old hardware compatibility changes inside `pulp/pulp/chips/soft_hier_old`.
+- `soft_hier_sdk/toolchain/` is generated by `sourceme.sh` and ignored by git.
+- `soft_hier_sdk/sw_build/` is a generated software build directory.
+- For regression checks, GEMM RedMule trace density is the strongest signal that the old custom
+  instruction path, offload decoder, iDMA, RedMule, and synchronization path are all connected.
