@@ -20,7 +20,7 @@
 ######################################################################
 
 SOFTHIER_OLD_TARGET ?= pulp.chips.soft_hier_old.flex_cluster
-SOFTHIER_OLD_CFG ?= soft_hier_sdk/examples/SoftHier/config/arch_NoC512.py
+SOFTHIER_OLD_CFG ?= soft_hier_sdk/examples/SoftHier/config/arch_NoC1024.py
 SOFTHIER_OLD_APP ?= soft_hier_sdk/runtime/app_example
 SOFTHIER_OLD_SW_BUILD ?= soft_hier_sdk/sw_build
 SOFTHIER_OLD_CORE_MODEL ?= fast
