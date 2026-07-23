@@ -20,6 +20,15 @@ import argparse
 import json
 import re
 
+annotation_regex = (
+    r'^\d+:\s+\d+:\s+\[[^\]]*/chip/cluster_'
+    r'(?P<cluster_idx>\d+)/cluster_registers/trace[^\]]*\]\s+'
+    r'(?P<words>.*):\s+'
+    r'(?P<tstart>\d+)\s+ns\s+->\s+'
+    r'(?P<tend>\d+)\s+ns\s+\|\s+'
+    r'period\s*=\s*(?P<period>\d+)\s+ns\s+\|\s+'
+    r'annotation_id\s*=\s*(?P<annotation_id>\d+)\s*$'
+)
 redmule_regex = r'^\d+: \d+: \[.*/chip/cluster_(?P<cluster_idx>\d+)/redmule/trace.*' \
                 r'Finished : (?P<tstart>\d+) ns ---> (?P<tend>\d+) ns \| .* \| uti = (?P<util>\d+\.\d+) \|'
 idma_regex = r'^\d+: \d+: \[.*/chip/cluster_(?P<cluster_idx>\d+)/idma/fe/trace.*' \
@@ -38,6 +47,27 @@ def parse_trace(input, output):
     # Parse file line by line
     with open(input) as f:
         for line in f:
+            # Match software-defined annotation intervals. The annotation ID
+            # supplies a stable Perfetto lane even when its words are changed.
+            m = re.match(annotation_regex, line)
+            if m:
+                match = m.groupdict()
+                annotation_id = int(match['annotation_id'])
+                phase = {
+                    'cluster_idx': match['cluster_idx'],
+                    'agent': match['words'],
+                    'tstart': match['tstart'],
+                    'tend': match['tend'],
+                    'track': f'annotation_{annotation_id}',
+                    'category': 'annotation',
+                    'attrs': {
+                        'annotation_id': annotation_id,
+                        'period_ns': int(match['period']),
+                        'info': line.rstrip('\n')
+                    }
+                }
+                phases.append(phase)
+                continue
             # Match against redmule regex
             m = re.match(redmule_regex, line)
             if m:
@@ -86,12 +116,17 @@ def parse_trace(input, output):
         track = 'cluster_' + phase['cluster_idx']
         if track not in rois:
             rois[track] = []
-        rois[track].append({
+        region = {
             'label': phase['agent'],
             'tstart': int(phase['tstart']),
             'tend': int(phase['tend']),
             'attrs': phase.get('attrs', {})
-        })
+        }
+        if 'track' in phase:
+            region['track'] = phase['track']
+        if 'category' in phase:
+            region['category'] = phase['category']
+        rois[track].append(region)
     for channel in hbm:
         track = 'hbm_' + channel['channel_idx']
         time = int(channel['time'])

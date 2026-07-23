@@ -63,9 +63,11 @@ def roi_to_perfetto(roi_trace, perfetto_trace):
                 'ts': us(ts),
                 'dur': us(dur),
                 'pid': thread,
-                'tid': region['label'],
+                'tid': region.get('track', region['label']),
                 'args': region['attrs']
             }
+            if 'category' in region:
+                event['cat'] = region['category']
             events.append(event)
 
     # Create TraceViewer JSON object

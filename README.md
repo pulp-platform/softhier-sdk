@@ -125,6 +125,57 @@ or:
 
 ## ✅ Verified Applications
 
+### 🏷️ Annotation API Test
+
+The annotation test exercises the complete annotation lifecycle on every core,
+including concurrent IDs, dynamic labels, invalid-label rejection, active
+interval handling, ID `0`, `UINT32_MAX`, and per-cluster isolation.
+
+Build the hardware model and test application:
+
+```bash
+source soft_hier_sdk/sourceme.sh
+
+make sh-old-hs \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC1024.py \
+  app=soft_hier_sdk/examples/SoftHier/software/annotation_test \
+  core_model=fast
+```
+
+Run with cluster-register tracing enabled:
+
+```bash
+make sh-old-runv \
+  cfg=soft_hier_sdk/examples/SoftHier/config/arch_NoC1024.py \
+  core_model=fast
+```
+
+Check the application result:
+
+```bash
+rg "ANNOTATION_TEST_(PASS|FAIL)" soft_hier_sdk/sw_build/analyze_trace.txt
+```
+
+A successful run prints:
+
+```text
+ANNOTATION_TEST_PASS
+```
+
+Convert the annotation intervals into cluster-scoped Perfetto tracks:
+
+```bash
+make sh-old-pfto
+```
+
+The verbose trace and converted output are written to:
+
+```text
+soft_hier_sdk/sw_build/analyze_trace.txt
+soft_hier_sdk/sw_build/roi.json
+soft_hier_sdk/sw_build/perfetto.json
+```
+
 ### 🟥 GEMM Systolic, NoC512
 
 ```bash
