@@ -214,3 +214,6 @@ acti-run%: acti-pre
 acti-clean:
 	@echo "clean up intermidiate files generated for Activation ..."
 	rm -f ${CUR_DIR}/sw/Activation/include/acti.h ${CUR_DIR}/sw/Activation/preload.elf ${CUR_DIR}/sw/Activation/preload.dump ${CUR_DIR}/sw/Activation/include/preload.h ${SH_DIR}/dump_*
+
+# Keep the existing default target and kernel flows unchanged.
+include ${CUR_DIR}/scripts/sparse_dma/sparse_dma.mk

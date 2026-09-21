@@ -11,3 +11,6 @@
 **/preload.dump
 **/preload.h
 out
+/build/
+/sw/SparseDMA/include/sparse_dma.h
+/sw/SparseDMA/include/golden.h
