@@ -35,3 +35,8 @@ verification and printing are excluded.
 
 Results, plots, binaries and traces are under `build/sparse_dma/`. These are
 SoftHier sanity measurements, without an RTL cycle-accuracy claim.
+
+`cycles.*` shows runtime; `hbm_bandwidth.*` shows HBM bandwidth utilization and
+effective GB/s (PNG/SVG/PDF). Utilization uses the peak of the accessed west HBM
+node 0 over the same measured interval as runtime. `REPORT.md`, `results.csv` and
+`results.json` include both measurements.

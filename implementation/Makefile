@@ -217,3 +217,4 @@ acti-clean:
 
 # Keep the existing default target and kernel flows unchanged.
 include ${CUR_DIR}/scripts/sparse_dma/sparse_dma.mk
+include ${CUR_DIR}/scripts/sparse_attn_access/sparse_attn_access.mk

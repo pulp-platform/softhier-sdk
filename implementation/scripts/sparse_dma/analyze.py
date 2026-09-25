@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Validate software results and the full-chip DMA/NoC/HBM route, then plot cycles."""
+"""Validate the full-chip DMA/NoC/HBM route, then plot cycles and HBM utilization."""
 import collections
 import csv
 import hashlib
@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 OUTPUT = Path(sys.argv[1]).resolve()
 IMPL = Path(__file__).resolve().parents[2]
 GVSOC = IMPL.parents[1]
+sys.path.insert(0, str(IMPL))
+from scripts.noc_v2 import NoCTraceV2
 ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
 
@@ -75,8 +77,14 @@ def read_variant(name, manifest):
     matrix_end = matrix_base + cfg['rows']*manifest['row_bytes']
     row_bytes = manifest['row_bytes']
     expected_rows = collections.Counter((matrix_base + i*row_bytes, row_bytes) for i in manifest['indices'])
+    backend = chip.get('data_noc_backend', 'legacy')
+    nodes = [dict(id=i, base=arch['hbm_start_base']+i*arch['hbm_node_addr_space'], position=[0,i+1]) for i in range(4)]
+    v2 = NoCTraceV2(arch['num_cluster_x'], nodes, arch['hbm_node_addr_space'],
+                     (matrix_base, matrix_end)) if backend == 'floonoc_v2' else None
     axi_reads, noc_beats, controllers = [], [], []
     for line in log.splitlines():
+        if v2 and 'NOC_V2_' in line and re.match(r'^\d+:',line):
+            v2.feed(line,int(line.split(':',1)[0]))
         if '/cluster_0/idma/axi_read/' in line and 'Sending read burst to AXI' in line:
             match = re.search(r'base: (0x[0-9a-f]+), size: (0x[0-9a-f]+)', line)
             addr, size = (int(x,16) for x in match.groups())
@@ -106,7 +114,11 @@ def read_variant(name, manifest):
             expected_beats[(addr,chunk)] += 1
             addr += chunk
             size -= chunk
-    require(collections.Counter(noc_beats) == expected_beats, name + ': NoC route/beat count mismatch')
+    if v2:
+        v2.finish(collections.Counter({(0,addr,size):count for (addr,size),count in expected_rows.items()}))
+        noc_beats = [(addr,size) for (_,addr,size) in v2.reads.elements()]
+    else:
+        require(collections.Counter(noc_beats) == expected_beats, name + ': NoC route/beat count mismatch')
     require(collections.Counter(controllers) == expected_beats, name + ': west HBM node 0 traffic mismatch')
     indices = re.findall(r'INDEX_READ addr=(0x[0-9a-f]+)', log)
     expected_index_reads = (cfg['selected']*2+7)//8 if name == 'hw-gather' else 0
@@ -114,7 +126,7 @@ def read_variant(name, manifest):
     require(log.count('GATHER_ROW id=') == (cfg['selected'] if name == 'hw-gather' else 0),
             name + ': gather decomposition mismatch')
     timing = audit_hbm(folder / 'run', manifest, int(fields['cycles']), config['clock']['frequency'])
-    return {'variant':name, 'cycles':int(fields['cycles']), 'bytes':int(fields['bytes']),
+    return {'variant':name, 'data_noc_backend':backend, 'cycles':int(fields['cycles']), 'bytes':int(fields['bytes']),
             'dma_descriptors':expected_descriptors, 'axi_rows':len(axi_reads),
             'noc_beats':len(noc_beats), 'hbm_node0_reads':len(controllers),
             'index_word_reads':len(indices), 'checksum':fields['checksum'], 'errors':0,
@@ -131,12 +143,16 @@ def main():
     timing_valid = all(item['timing_valid'] for item in results)
     for item in results:
         item['speedup_vs_core_loop'] = results[0]['cycles']/item['cycles']
+        item['hbm_utilization_percent'] = 100 * item['effective_gbps'] / item['hbm_peak_gbps']
     revisions = {name:subprocess.check_output(['git','-C',str(path),'rev-parse','HEAD'],text=True).strip()
                  for name,path in [('gvsoc',GVSOC),('pulp',GVSOC/'pulp'),('core',GVSOC/'core'),('sdk',IMPL.parent)]}
     sources = [p for p in IMPL.rglob('*') if p.is_file() and 'build' not in p.relative_to(IMPL).parts
                and p.suffix in ('.c','.h','.py','.sh','.mk')]
     sources += [GVSOC/'pulp/pulp/chips/soft_hier_old'/name for name in
                 ('cluster_unit.py','flex_cluster.py','flex_cluster_arch.py')]
+    sources += [GVSOC/'pulp/pulp/chips/soft_hier_old'/name for name in
+                ('flex_mesh_noc_v2.py','noc_bridge.hpp','noc_bridge_legacy.cpp','noc_bridge_v2.cpp')]
+    sources += [p for p in (GVSOC/'pulp/pulp/floonoc_v2').iterdir() if p.suffix in ('.cpp','.hpp','.py')]
     source_hashes = {str(p.relative_to(GVSOC)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sources}
     record = {'workload':manifest, 'results':results, 'revisions':revisions, 'source_sha256':source_hashes,
               'functional_valid':True, 'timing_valid':timing_valid,
@@ -164,21 +180,46 @@ def main():
     for suffix in ('png','svg','pdf'):
         fig.savefig(OUTPUT/f'cycles.{suffix}',dpi=180)
     plt.close(fig)
+    fig,ax = plt.subplots(figsize=(7.2,4.8),layout='constrained')
+    utilization = [r['hbm_utilization_percent'] for r in results]
+    bars=ax.bar(['Core loop','Inlined loop','HW gather'],utilization,
+                color=['#74859c','#2e86ab','#16867c'],width=.6)
+    ax.bar_label(bars,labels=[f"{r['hbm_utilization_percent']:.2f}%\n{r['effective_gbps']:.2f} GB/s"
+                             for r in results],padding=5)
+    ax.set_ylim(0,max(100,max(utilization)*1.2))
+    ax.set_ylabel('HBM node 0 bandwidth utilization (%)')
+    ax.set_title('SoftHier: cluster 0 → NoC → west HBM node 0\n'
+                 f"{manifest['kernel']['selected']} selected rows × {manifest['row_bytes']} bytes")
+    fig.supxlabel(f"Utilization = read bytes / execution time / {results[0]['hbm_peak_gbps']:.3f} GB/s\n"
+                  'Execution time includes DMA setup, issue and completion wait.',fontsize=9)
+    if not timing_valid:
+        fig.suptitle('TIMING INVALID: overlapping HBM bursts; raw simulator results', color='#b64036', fontsize=10)
+    ax.grid(axis='y',alpha=.2)
+    ax.set_axisbelow(True)
+    for suffix in ('png','svg','pdf'):
+        fig.savefig(OUTPUT/f'hbm_bandwidth.{suffix}',dpi=180)
+    plt.close(fig)
     arch, kernel = manifest['architecture'], manifest['kernel']
     rows=['# SoftHier sparse-DMA sanity test', '',
           'Path: cluster 0 → NoC → west HBM node 0 → local TCDM.',
+          f"NoC backend: `{results[0]['data_noc_backend']}`.",
           f"HBM: `{arch['hbm_type']}`; chip clock: {results[0]['clock_hz'] // 1000000} MHz.",
           f"Workload: {kernel['selected']} rows × {manifest['row_bytes']} bytes, seed {kernel['seed']}.", '',
-          '| Case | Cycles | Speedup | DMA descriptors | HBM timing |',
-          '| --- | ---: | ---: | ---: | --- |']
+          '| Case | Cycles | Speedup | HBM GB/s | HBM utilization | DMA descriptors | HBM timing |',
+          '| --- | ---: | ---: | ---: | ---: | ---: | --- |']
     for item in results:
         rows.append(f"| {item['variant']} | {item['cycles']:,} | {item['speedup_vs_core_loop']:.2f}× | "
+                    f"{item['effective_gbps']:.2f} | {item['hbm_utilization_percent']:.2f}% | "
                     f"{item['dma_descriptors']} | {'PASS' if item['timing_valid'] else 'FAIL'} |")
     if not timing_valid:
         rows += ['', '**HBM timing invalid: these counts cannot be used as performance results.**']
     rows += ['', '![Cycles](cycles.png)', '',
+             '![HBM bandwidth utilization](hbm_bandwidth.png)', '',
+             'HBM utilization is audited payload bytes divided by the measured execution time and',
+             'the recorded peak of west HBM node 0. This kernel reads payload from one node;',
+             'normalizing over all four enabled nodes would divide these percentages by four.', '',
              'All cases passed bit-exact output, index preload, guard and descriptor checks.',
-             'Traces verify 128 row reads, 256 NoC/HBM requests to west node 0, and 32 packed',
+             f"Traces verify 128 row reads, {results[0]['noc_beats']} NoC requests and 256 HBM-controller beats to west node 0, and 32 packed",
              'index reads for HW gather. HBM checks cover byte counts, burst overlap and bandwidth.',
              f"The recorded HBM peak is {results[0]['hbm_peak_gbps']:.2f} GB/s; "
              f"the data-only minimum is {results[0]['minimum_data_cycles']:.1f} cycles.", '',
@@ -187,7 +228,11 @@ def main():
              '64 DMA transactions, 256 burst slots and a 1024-bit NoC. Only cluster 0/core 0 runs.',
              'These are SoftHier sanity measurements, without an RTL cycle-accuracy claim.', '',
              '`results.csv` and `results.json` contain measurements and validation details.',
-             'Binaries and traces are in each case directory. Reproduce with `make sparse-runv`.']
+             'Binaries and traces are in each case directory. From `softhier-sdk/implementation`:', '',
+             '```bash',
+             f"make sparse-runv SOFTHIER_DATA_NOC={results[0]['data_noc_backend']} SPARSE_OUTPUT=\"$PWD/build/{OUTPUT.name}\"",
+             f"make sparse-report SPARSE_OUTPUT=\"$PWD/build/{OUTPUT.name}\"",
+             '```']
     (OUTPUT/'REPORT.md').write_text('\n'.join(rows)+'\n')
     print('SPARSE_DMA_FUNCTIONAL_PASS variants=3 path=cluster0-NoC-west-HBM-node0')
     print(OUTPUT/'REPORT.md')

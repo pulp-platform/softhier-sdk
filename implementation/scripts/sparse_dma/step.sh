@@ -4,7 +4,8 @@ source "$(dirname -- "${BASH_SOURCE[0]}")/env.sh"
 SPARSE_ARCH_FILE="${SPARSE_ARCH_FILE:-$SPARSE_SDK_IMPL/config/arch/sparse_dma.py}"
 SPARSE_KERNEL_FILE="${SPARSE_KERNEL_FILE:-$SPARSE_SDK_IMPL/config/kernels/sparse_dma.py}"
 SPARSE_APP_DIR="$SPARSE_SDK_IMPL/sw/SparseDMA"
-SPARSE_OUTPUT_DIR="$SPARSE_SDK_IMPL/build/sparse_dma"
+SPARSE_OUTPUT_DIR="${SPARSE_OUTPUT:-$SPARSE_SDK_IMPL/build/sparse_dma}"
+mkdir -p "$SPARSE_OUTPUT_DIR/logs"
 SPARSE_VARIANT="${2:-core-loop}"
 case "$SPARSE_VARIANT" in
     core-loop) SPARSE_APP_VARIANT=core_loop ;;
@@ -44,7 +45,7 @@ case "${1:-}" in
             --binary="$SPARSE_VARIANT_DIR/sw/softhier.elf" \
             --preload="$SPARSE_APP_DIR/preload.elf" --core-model=fast \
             run --trace=/chip/cluster_0/idma --trace=/chip/data_noc/ni_1_1 \
-            --trace=/chip/data_noc/router_1_1 --trace=/chip/west_hbm_ctrl \
+            --trace=/chip/data_noc --trace=/chip/west_hbm_ctrl \
             --trace-level=trace > simulation.log 2>&1
         SPARSE_RUN_STATUS=$?
         set -e

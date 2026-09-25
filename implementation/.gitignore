@@ -14,3 +14,4 @@ out
 /build/
 /sw/SparseDMA/include/sparse_dma.h
 /sw/SparseDMA/include/golden.h
+/sw/SparseAttnAccess/include/sparse_attn_access.h
