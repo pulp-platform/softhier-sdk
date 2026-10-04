@@ -82,6 +82,9 @@ the routing distribution of a trained checkpoint.
 
 ## Build and run in this repository
 
+For a fresh checkout, [SETUP.md](SETUP.md) records the simulator revisions,
+dependency versions, HBM configuration, and build commands used in evaluation.
+
 From the GVSOC repository root, activate the locally prepared toolchain, Python,
 SystemC, rebuilt DRAMSys library, and compatible DRAM configuration:
 
