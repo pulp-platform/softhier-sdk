@@ -127,6 +127,10 @@ zero-cycle direct initialization. Cores are released at cycle 1.
 
 ## Validation and timing
 
+The measured full-model results for batches 1, 8, and 64 are in
+[RESULTS.md](RESULTS.md), with machine-readable records in
+[results/measurements.json](results/measurements.json).
+
 `tools/reference.py` independently computes the layer with NumPy from the exact
 generated FP16 weights and inputs. It reproduces the documented FP16 tile
 boundaries, requires exact expert IDs, and checks finite numerical output with

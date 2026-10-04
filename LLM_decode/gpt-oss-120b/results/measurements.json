@@ -1,0 +1,173 @@
+{
+  "recorded_at_utc": "2026-10-04T12:45:03.611305+00:00",
+  "repositories": {
+    "gvsoc": "0ab0442c07d030d380010c59d3004d5a5b7c7f3f",
+    "core": "4be5293a4976eea02d224e425493b755d46b1d15",
+    "pulp": "f822a9413950f713159f85c4dd1509963e151b4e",
+    "engine": "16dadd30d76a0aa2a33a85d3bdc52a75558a83c3",
+    "sdk_decoder_source": "42313371d6219e29308babc9dad6812fc8244efd"
+  },
+  "model": {
+    "name": "gpt-oss-120b",
+    "layer_index": 1,
+    "hidden_size": 2880,
+    "intermediate_size": 2880,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 8,
+    "head_dim": 64,
+    "num_experts": 128,
+    "experts_per_token": 4,
+    "cached_tokens": 2048,
+    "max_batch": 64,
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 150000.0,
+    "rope_scaling_factor": 32.0,
+    "rope_original_context": 4096,
+    "rope_beta_fast": 32.0,
+    "rope_beta_slow": 1.0,
+    "swiglu_alpha": 1.702,
+    "swiglu_limit": 7.0,
+    "tile_k": 256,
+    "tile_n": 128,
+    "attention_tile": 128,
+    "seed": 120
+  },
+  "clock_hz": 1000000000,
+  "weights_bytes": 6903704960,
+  "cache_stride": 2176,
+  "shared_sequence_outputs_byte_identical": true,
+  "runs": [
+    {
+      "batch": 1,
+      "cached_tokens": 2048,
+      "cycles": 3432185,
+      "simulated_ns": 3432412,
+      "stages": {
+        "norm1": 222187,
+        "qkv": 146224,
+        "rope_cache": 286617,
+        "gqa": 994599,
+        "out_projection": 112194,
+        "attention_residual": 1216,
+        "norm2": 222478,
+        "router_gemm": 26211,
+        "topk": 13390,
+        "dispatch": 704,
+        "expert_up": 464086,
+        "swiglu": 295531,
+        "expert_down": 271435,
+        "combine": 375313
+      },
+      "distinct_experts": 4,
+      "assignments": 4,
+      "host_seconds": 415.9737390919472,
+      "binary_sha256": "dcf1bd1922f3bbf0125ffda176a1207d3e4663163de75ed6787371b599996f32"
+    },
+    {
+      "batch": 8,
+      "cached_tokens": 2048,
+      "cycles": 11745299,
+      "simulated_ns": 11745526,
+      "stages": {
+        "norm1": 222474,
+        "qkv": 153551,
+        "rope_cache": 287472,
+        "gqa": 4001633,
+        "out_projection": 114799,
+        "attention_residual": 1597,
+        "norm2": 222802,
+        "router_gemm": 26786,
+        "topk": 91956,
+        "dispatch": 1903,
+        "expert_up": 3617464,
+        "swiglu": 592347,
+        "expert_down": 2034652,
+        "combine": 375863
+      },
+      "distinct_experts": 32,
+      "assignments": 32,
+      "host_seconds": 1576.294021787995,
+      "binary_sha256": "dcf1bd1922f3bbf0125ffda176a1207d3e4663163de75ed6787371b599996f32"
+    },
+    {
+      "batch": 64,
+      "cached_tokens": 2048,
+      "cycles": 60598176,
+      "simulated_ns": 60598403,
+      "stages": {
+        "norm1": 887974,
+        "qkv": 246236,
+        "rope_cache": 1150391,
+        "gqa": 31823444,
+        "out_projection": 154740,
+        "attention_residual": 6472,
+        "norm2": 889345,
+        "router_gemm": 55216,
+        "topk": 720754,
+        "dispatch": 12512,
+        "expert_up": 11457447,
+        "swiglu": 4728336,
+        "expert_down": 6953228,
+        "combine": 1512081
+      },
+      "distinct_experts": 115,
+      "assignments": 256,
+      "host_seconds": 6339.556035831047,
+      "binary_sha256": "dcf1bd1922f3bbf0125ffda176a1207d3e4663163de75ed6787371b599996f32",
+      "case_sha256": "36f83a8d2b9e7295b32f49f52bcf9558895d4a951cb6d0344c09fa052fc558b5"
+    }
+  ],
+  "validation": {
+    "1": {
+      "routes": {
+        "pass_check": true,
+        "max_abs_error": 0.0,
+        "elements": 4
+      },
+      "route_weights": {
+        "pass_check": true,
+        "max_abs_error": 0.0,
+        "elements": 4
+      },
+      "output": {
+        "pass_check": true,
+        "max_abs_error": 0.0003662109375,
+        "elements": 2880
+      }
+    },
+    "8": {
+      "routes": {
+        "pass_check": true,
+        "max_abs_error": 0.0,
+        "elements": 32
+      },
+      "route_weights": {
+        "pass_check": true,
+        "max_abs_error": 0.0,
+        "elements": 32
+      },
+      "output": {
+        "pass_check": true,
+        "max_abs_error": 0.00390625,
+        "elements": 23040
+      }
+    },
+    "64": {
+      "routes": {
+        "pass_check": true,
+        "max_abs_error": 0.0,
+        "elements": 256
+      },
+      "route_weights": {
+        "pass_check": true,
+        "max_abs_error": 0.0,
+        "elements": 256
+      },
+      "output": {
+        "pass_check": true,
+        "max_abs_error": 0.00390625,
+        "elements": 184320
+      }
+    }
+  }
+}
