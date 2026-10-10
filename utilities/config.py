@@ -19,6 +19,7 @@ import re
 import ast
 import math
 import argparse
+import json
 from pathlib import Path
 
 C_HEADER = """//
@@ -63,13 +64,15 @@ S_HEADER = """#
 
 parser = argparse.ArgumentParser(description="Generate C and S header files from a SoftHier configuration file.")
 parser.add_argument("input_file", nargs="?", default="pulp/pulp/chips/soft_hier_old/flex_cluster_arch.py", help="Path to the input Python file")
+parser.add_argument("--output-dir", type=Path, help="Generate headers here instead of updating the runtime headers")
 args = parser.parse_args()
 input_file = args.input_file
 
 # Read the input Python file
 repo_root = Path(__file__).resolve().parents[2]
-C_header_file = repo_root / 'soft_hier_sdk/runtime/runtime/include/flex_cluster_arch.h'
-S_header_file = repo_root / 'soft_hier_sdk/runtime/runtime/include/flex_cluster_arch.inc'
+output_dir = args.output_dir or repo_root / 'soft_hier_sdk/runtime/runtime/include'
+C_header_file = output_dir / 'flex_cluster_arch.h'
+S_header_file = output_dir / 'flex_cluster_arch.inc'
 C_header_file.parent.mkdir(parents=True, exist_ok=True)
 
 # Initialize a dictionary to store the class attributes and their values
@@ -95,6 +98,9 @@ with open(C_header_file, 'w') as file:
     for attr_name, attr_value in attributes.items():
         # Convert attribute name to uppercase and prefix with 'ARCH_'
         define_name = f'ARCH_{attr_name.upper()}'
+        if attr_value.lstrip().startswith(("'", '"')):
+            file.write(f'#define {define_name} {json.dumps(ast.literal_eval(attr_value))}\n')
+            continue
         if define_name == 'ARCH_NUM_CORE_PER_CLUSTER':
             num_core_per_cluster = int(attr_value)
             pass
@@ -136,6 +142,8 @@ with open(S_header_file, 'w') as file:
     for attr_name, attr_value in attributes.items():
         # Convert attribute name to uppercase and prefix with 'ARCH_'
         define_name = f'ARCH_{attr_name.upper()}'
+        if attr_value.lstrip().startswith(("'", '"')):
+            continue
         if define_name == 'ARCH_NUM_CORE_PER_CLUSTER':
             num_core_per_cluster = int(attr_value)
             pass
