@@ -16,6 +16,11 @@
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #define CEIL(a,b) (((a) + (b) - 1) / (b))
 
+/* Old generated preloads remain usable with the original schedule. */
+#ifndef L_DECODE_OPT
+#define L_DECODE_OPT 0
+#endif
+
 typedef struct { uint32_t expert[L_TOPK]; float weight[L_TOPK]; } Route;
 
 static uint64_t channel(unsigned cid, unsigned off)
@@ -79,6 +84,7 @@ static void add_half(half_t *dst, const half_t *a, const half_t *b, unsigned n, 
  * cyclic across channels, whereas every tile of an expert stays at its owner.
  * Row addresses permit gathering routed tokens and scattering top-k results.
  */
+#if !L_DECODE_OPT
 static void linear(unsigned cid, unsigned m, unsigned k, unsigned n,
                    const uint64_t *input, const uint64_t *output,
                    unsigned woff, unsigned boff, unsigned distributed)
@@ -107,6 +113,79 @@ static void linear(unsigned cid, unsigned m, unsigned k, unsigned n,
         }
     }
 }
+#endif
+
+#if L_DECODE_OPT
+/* Keep inputs in [K tile][row][KT] order for the entire projection. Each
+ * weight panel is fetched once for all m rows and overlaps the preceding
+ * panel's GEMMs. No outstanding DMA crosses a source-backend switch.
+ *
+ * tile_first selects this cluster's cyclic stripe. Expert stripes rotate by
+ * expert id; dense stripes start at cid. Fused gate/up tiles contain complete
+ * interleaved pairs, so SwiGLU can run before scattering the activation.
+ */
+static void linear_decode(unsigned cid, unsigned m, unsigned k, unsigned n,
+                          const uint64_t *input, const uint64_t *output,
+                          unsigned woff, unsigned boff, unsigned tile_first,
+                          unsigned swiglu)
+{
+    unsigned steps = CEIL(k, L_KT), tile_bytes = L_KT * L_NT * 2;
+    if (tile_first >= CEIL(n, L_NT)) return;
+    if (k % L_KT)
+        clear(L_L1_A + (steps - 1) * m * L_KT * 2, m * L_KT * 2);
+    for (unsigned r = 0; r < m; ++r) {
+        flex_dma_async_2d(L_L1_A + r * L_KT * 2, input[r],
+                          L_KT * 2, m * L_KT * 2, L_KT * 2, k / L_KT);
+        if (k % L_KT)
+            flex_dma_async_1d(L_L1_A + ((steps - 1) * m + r) * L_KT * 2,
+                              input[r] + (steps - 1) * L_KT * 2, (k % L_KT) * 2);
+        /* Bound queued 2D rows on the legacy DMA. Queuing whole batches can
+         * stall its backend under backpressure (notably the K=4096 gather).
+         * Weight-panel prefetch below still overlaps with RedMule. */
+        flex_dma_async_wait_all();
+    }
+    __asm__ volatile("fence rw, rw" ::: "memory");
+    flex_redmule_config(m, L_KT, L_NT);
+    for (unsigned j = tile_first, local = 0; j < CEIL(n, L_NT); j += NC, ++local) {
+        unsigned valid = MIN(L_NT, n - j * L_NT);
+        uint64_t weights = channel(cid, woff + local * steps * tile_bytes);
+        clear(L_L1_C, m * L_NT * 2);
+        copy(L_L1_BIAS, channel(cid, boff + local * L_NT * 2), L_NT * 2);
+        if (!local)
+            copy(L_L1_W, weights, MIN(L_WP, steps) * tile_bytes);
+        /* Keep alternating buffers across output tiles. The last panel of
+         * this tile overlaps the first weight read for the next output tile;
+         * its DMA is drained before clearing/scattering local output data. */
+        for (unsigned kb = 0, panel = local * CEIL(steps, L_WP); kb < steps; kb += L_WP, ++panel) {
+            unsigned wbuf = L_L1_W + (panel % 2) * L_WP * tile_bytes;
+            if (kb + L_WP < steps)
+                flex_dma_async_1d(L_L1_W + ((panel + 1) % 2) * L_WP * tile_bytes,
+                                  weights + (kb + L_WP) * tile_bytes,
+                                  MIN(L_WP, steps - kb - L_WP) * tile_bytes);
+            else if (j + NC < CEIL(n, L_NT))
+                flex_dma_async_1d(L_L1_W + ((panel + 1) % 2) * L_WP * tile_bytes,
+                                  weights + steps * tile_bytes, MIN(L_WP, steps) * tile_bytes);
+            for (unsigned s = 0; s < MIN(L_WP, steps - kb); ++s) {
+                flex_redmule_trigger(L_L1_A + (kb + s) * m * L_KT * 2,
+                                     wbuf + s * tile_bytes, L_L1_C, REDMULE_FP_16);
+                flex_redmule_wait();
+            }
+            flex_dma_async_wait_all();
+            __asm__ volatile("fence rw, rw" ::: "memory");
+        }
+        for (unsigned r = 0; r < m; ++r) {
+            half_t *row = HBUF(L_L1_C) + r * L_NT;
+            v_add_half(row, row, HBUF(L_L1_BIAS), valid);
+            if (swiglu) {
+                v_swiglu(HBUF(L_L1_TMP), row, valid / 2);
+                copy(output[r] + j * L_NT, L_L1_TMP, valid);
+            } else {
+                copy(output[r] + j * L_NT * 2, (unsigned)row, valid * 2);
+            }
+        }
+    }
+}
+#endif
 
 static void projection(unsigned cid, unsigned inoff, unsigned outoff,
                        unsigned k, unsigned n, unsigned woff, unsigned boff)
@@ -118,7 +197,11 @@ static void projection(unsigned cid, unsigned inoff, unsigned outoff,
             in[r] = token(first + r, inoff, k);
             out[r] = token(first + r, outoff, n);
         }
+#if L_DECODE_OPT
+        linear_decode(cid, m, k, n, in, out, woff, boff, cid, 0);
+#else
         linear(cid, m, k, n, in, out, woff, boff, 1);
+#endif
     }
 }
 
@@ -248,6 +331,45 @@ static void route(unsigned cid)
     }
 }
 
+#if L_DECODE_OPT
+/* All cores enter the one dependency barrier. Only core 0 uses the cluster's
+ * DMA, RedMule and Spatz. Route decisions are computed on-device; each sweep
+ * gathers every token selecting an expert into the same M tile.
+ */
+static void experts(unsigned cid)
+{
+    Route *routes = (Route *)L_L1_ROUTES;
+    unsigned first_core = flex_is_first_core();
+    if (first_core)
+        for (unsigned t = 0; t < L_TOKENS; ++t)
+            copy((unsigned)&routes[t], channel(t % NC, L_OFF_ROUTES + t / NC * sizeof(Route)), sizeof(Route));
+    for (unsigned down = 0; down < 2; ++down) {
+        if (first_core) {
+            for (unsigned e = 0; e < L_EXPERTS; ++e) {
+                unsigned tokens[L_TOKENS], slots[L_TOKENS], count = 0;
+                for (unsigned t = 0; t < L_TOKENS; ++t)
+                    for (unsigned slot = 0; slot < L_TOPK; ++slot)
+                        if (routes[t].expert[slot] == e) { tokens[count] = t; slots[count++] = slot; }
+                for (unsigned first = 0; first < count; first += L_MT) {
+                    unsigned m = MIN(L_MT, count - first), extra = e * L_EXPERT_STRIDE;
+                    uint64_t in[L_MT], out[L_MT];
+                    for (unsigned r = 0; r < m; ++r) {
+                        unsigned t = tokens[first + r], slot = slots[first + r];
+                        uint64_t activation = token(t, L_OFF_ACTIVATION, L_TOPK * L_I) + slot * L_I * 2;
+                        in[r] = down ? activation : token(t, L_OFF_NORM2, L_H);
+                        out[r] = down ? token(t, L_OFF_PARTIAL, L_TOPK * L_H) + slot * L_H * 2 : activation;
+                    }
+                    linear_decode(cid, m, down ? L_I : L_H, down ? L_H : 2 * L_I, in, out,
+                                  (down ? L_OFF_W_DOWN : L_OFF_W_UP) + extra,
+                                  (down ? L_OFF_B_DOWN : L_OFF_B_UP) + extra,
+                                  (cid + NC - e % NC) % NC, !down);
+                }
+            }
+        }
+        if (!down) flex_global_barrier_xy();
+    }
+}
+#else
 static void experts(unsigned cid)
 {
     Route *routes = (Route *)L_L1_ROUTES;
@@ -278,6 +400,7 @@ static void experts(unsigned cid)
         }
     }
 }
+#endif
 
 static void combine(unsigned cid)
 {
@@ -364,12 +487,13 @@ int main(void)
     flex_barrier_xy_init(); flex_global_barrier_xy();
     if (cid == 0 && first) { flex_timer_start(); previous = cycles(); }
     flex_global_barrier_xy();
-#define STAGE(id, operation) do { \
-    if (first) { operation; } \
+#define STAGE_ALL(id, operation) do { \
+    operation; \
     flex_global_barrier_xy(); \
     if (cid == 0 && first) { unsigned now = cycles(); stages[id] = now - previous; \
         elapsed += stages[id]; previous = now; } \
 } while (0)
+#define STAGE(id, operation) STAGE_ALL(id, if (first) { operation; })
     STAGE(0, norm(cid, L_OFF_X, L_OFF_NORM1, L_OFF_NORM1_WEIGHT));
     STAGE(1, projection(cid, L_OFF_NORM1, L_OFF_QKV, L_H, L_QKV, L_OFF_W_QKV, L_OFF_B_QKV));
     STAGE(2, rope_append(cid));
@@ -379,7 +503,11 @@ int main(void)
     STAGE(6, norm(cid, L_OFF_RESIDUAL, L_OFF_NORM2, L_OFF_NORM2_WEIGHT));
     STAGE(7, projection(cid, L_OFF_NORM2, L_OFF_ROUTER, L_H, L_EXPERTS, L_OFF_W_ROUTER, L_OFF_B_ROUTER));
     STAGE(8, route(cid));
+#if L_DECODE_OPT
+    STAGE_ALL(9, experts(cid));
+#else
     STAGE(9, experts(cid));
+#endif
     STAGE(10, combine(cid));
     if (cid == 0 && first) flex_timer_end();
     flex_global_barrier_xy();
@@ -395,6 +523,7 @@ int main(void)
             errors += *(volatile unsigned *)(ARCH_SYNC_BASE + c * ARCH_SYNC_SIZE + 32);
             checked += *(volatile unsigned *)(ARCH_SYNC_BASE + c * ARCH_SYNC_SIZE + 36);
         }
+        printf("LLM_SCHEDULE decode_optimized=%u\n", L_DECODE_OPT);
         for (unsigned i = 0; i < 11; ++i)
             printf("LLM_STAGE id=%u cycles=%u\n", i, stages[i]);
         printf("LLM_DRAM3D_%s batch=%u seq=%u past=%u layer=%u cycles_hi=%u cycles_lo=%u errors=%u checked=%u\n",

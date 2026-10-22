@@ -11,7 +11,8 @@ SEED ?= 19
 PYTHON ?= python3
 CC = $(SDK_DIR)/toolchain/install/bin/riscv32-unknown-elf-gcc
 GVSOC ?= $(GVSOC_DIR)/install/bin/gvsoc
-OUT ?= $(APP_DIR)/build/$(CASE)-l$(LAYER)-s$(SEED)
+BASELINE ?= 0
+OUT ?= $(APP_DIR)/build/$(CASE)-l$(LAYER)-s$(SEED)$(if $(filter 1,$(BASELINE)),-baseline)
 TIMEOUT ?= 3600
 ALL_EXPERTS ?= 0
 EXTRA_CFLAGS ?=
@@ -19,10 +20,14 @@ DECODE_CASES := $(foreach b,1 8 16,$(foreach k,1024 2048 4096,decode_b$(b)_kv$(k
 PREFILL_CASES := prefill_s64 prefill_s128
 CASES ?= $(DECODE_CASES) $(PREFILL_CASES)
 GEN_ARGS = --arch $(ARCH) --case $(CASE) --layer $(LAYER) \
-           --seed $(SEED) --output $(OUT) $(if $(filter 1,$(ALL_EXPERTS)),--all-experts)
+           --seed $(SEED) --output $(OUT) $(if $(filter 1,$(ALL_EXPERTS)),--all-experts) \
+           $(if $(filter 1,$(BASELINE)),--baseline)
 
-.PHONY: all plan generate compile build run simulate suite
+.PHONY: all plan generate compile build run simulate suite test
 all: build
+
+test:
+	$(PYTHON) $(APP_DIR)/scripts/test_decode.py
 
 plan:
 	$(PYTHON) $(APP_DIR)/scripts/generate.py $(GEN_ARGS) --plan-only

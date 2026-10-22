@@ -50,6 +50,21 @@ static void v_narrow(half_t *dst, const float *src, unsigned n)
     vector_sync();
 }
 
+/* Add in FP32 and narrow once, matching add_half without scratch spills. */
+static inline void v_add_half(half_t *dst, const half_t *a, const half_t *b, unsigned n)
+{
+    while (n) {
+        unsigned vl;
+        __asm__ volatile(
+            "vsetvli %0, %1, e16, m2, ta, ma\n"
+            "vle16.v v0, (%2)\nvle16.v v4, (%3)\nvfwadd.vv v8, v0, v4\n"
+            "vfncvt.f.f.w v0, v8\nvse16.v v0, (%4)"
+            : "=&r"(vl) : "r"(n), "r"(a), "r"(b), "r"(dst) : VREGS);
+        n -= vl; a += vl; b += vl; dst += vl;
+    }
+    vector_sync();
+}
+
 /* dst = a * scale + b. Separate multiply/add also match the reference. */
 static void v_axpby(float *dst, const float *a, float scale, const float *b, unsigned n)
 {

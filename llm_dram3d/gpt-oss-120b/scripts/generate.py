@@ -29,7 +29,7 @@ def load_arch(path):
     return module.FlexClusterArch()
 
 
-def layout(m, batch, seq, past, arch):
+def layout(m, batch, seq, past, arch, decode_opt=False):
     nc = arch.num_cluster_x * arch.num_cluster_y
     if (arch.num_cluster_x, arch.num_cluster_y) != (4, 4):
         raise ValueError("This initial mapping requires the 4x4 cluster preset")
@@ -60,12 +60,17 @@ def layout(m, batch, seq, past, arch):
         reserve("b_" + name, tiles * NT * 2)
         matrices[name] = [k, n]
     expert_start = cursor
-    reserve("w_up", ceildiv(2 * m.intermediate, NT) * ceildiv(m.hidden, KT) * KT * NT * 2)
-    reserve("b_up", ceildiv(2 * m.intermediate, NT) * NT * 2)
-    reserve("w_down", ceildiv(m.hidden, NT) * ceildiv(m.intermediate, KT) * KT * NT * 2)
-    reserve("b_down", ceildiv(m.hidden, NT) * NT * 2)
+    # Decode stripes every expert's output tiles across all channels. Rotate
+    # the first tile by expert id so partial last stripes balance across experts.
+    expert_channels = nc if decode_opt else 1
+    up_tiles = ceildiv(ceildiv(2 * m.intermediate, NT), expert_channels)
+    down_tiles = ceildiv(ceildiv(m.hidden, NT), expert_channels)
+    reserve("w_up", up_tiles * ceildiv(m.hidden, KT) * KT * NT * 2)
+    reserve("b_up", up_tiles * NT * 2)
+    reserve("w_down", down_tiles * ceildiv(m.intermediate, KT) * KT * NT * 2)
+    reserve("b_down", down_tiles * NT * 2)
     stride = cursor - expert_start
-    cursor = expert_start + ceildiv(m.experts, nc) * stride
+    cursor = expert_start + (m.experts if decode_opt else ceildiv(m.experts, nc)) * stride
     weight_end = cursor
     rows = ceildiv(batch * seq, nc)
     fields = dict(x=m.hidden, norm1=m.hidden, qkv=m.qkv, attn=m.qdim,
@@ -82,9 +87,13 @@ def layout(m, batch, seq, past, arch):
     cache_stride = align((past + seq) * m.head_dim * 2)
     reserve("cache_k", ceildiv(batch * m.kv_heads, nc) * cache_stride)
     reserve("cache_v", ceildiv(batch * m.kv_heads, nc) * cache_stride)
-    # Reused by successive experts on a channel; at most MT routed tokens live.
-    reserve("up", MT * 2 * m.intermediate * 2)
-    reserve("activation", MT * m.intermediate * 2)
+    if decode_opt:
+        # One slot per token/selected expert permits a single barrier between
+        # the fused gate/up/SwiGLU sweep and the down-projection sweep.
+        reserve("activation", rows * m.topk * m.intermediate * 2)
+    else:
+        reserve("up", MT * 2 * m.intermediate * 2)
+        reserve("activation", MT * m.intermediate * 2)
     if cursor > min(arch.dram3d_node_space, 2**31):
         raise ValueError("Layer exceeds the DRAM channel capacity or its aperture")
     max_k = max(m.hidden, m.intermediate, m.qdim)
@@ -92,8 +101,13 @@ def layout(m, batch, seq, past, arch):
     attention_bytes = 2 * (group * m.head_dim + 3 * BC * m.head_dim +
                            group * BC + group * m.head_dim) + 4 * (group * m.head_dim + 3 * group)
     l1, lc = {}, arch.cluster_tcdm_base + 0x1000
-    for name, size in (("a", max(MT * ceildiv(max_k, KT) * KT * 2, attention_bytes)),
-                       ("x", MT * KT * 2), ("w", KT * NT * 2),
+    local_rows = min(MT, batch * seq) if decode_opt else MT
+    # Two weight panels overlap DMA with compute. Keep the K=128 GEMM calls
+    # unchanged: panel size affects transfers, not FP16 rounding.
+    weight_blocks = (8 if batch <= 8 else 4) if decode_opt else 1
+    for name, size in (("a", max(local_rows * ceildiv(max_k, KT) * KT * 2, attention_bytes)),
+                       ("x", 0 if decode_opt else MT * KT * 2),
+                       ("w", (2 if decode_opt else 1) * weight_blocks * KT * NT * 2),
                        ("c", MT * NT * 2), ("bias", NT * 2),
                        ("tmp", max(m.qkv * 4, m.topk * m.hidden * 2, 32768)),
                        ("routes", batch * seq * m.topk * 8)):
@@ -104,22 +118,24 @@ def layout(m, batch, seq, past, arch):
     return dict(offsets=offsets, matrices=matrices, fields=fields,
                 expert_stride=stride, cache_stride=cache_stride,
                 channel_bytes=cursor, weight_bytes_per_channel=weight_end,
-                tcdm_bytes=lc - arch.cluster_tcdm_base, l1=l1, channels=nc)
+                tcdm_bytes=lc - arch.cluster_tcdm_base, l1=l1, channels=nc,
+                decode_optimized=decode_opt, weight_panel_k_tiles=weight_blocks)
 
 
 class ElfWriter:
     """Stream segments; never assemble a multi-gigabyte layer in a bytearray."""
-    def __init__(self, path):
+    def __init__(self, path, max_segments=2048):
         self.file = path.open("wb")
         self.headers = []
-        self.file.seek(64 + 2048 * 56)
+        self.max_segments = max_segments
+        self.file.seek(64 + max_segments * 56)
         self.payload = 0
 
     def add(self, address, array):
         array = np.ascontiguousarray(array)
         if not array.nbytes:
             return
-        if len(self.headers) >= 2048:
+        if len(self.headers) >= self.max_segments:
             raise ValueError("Too many ELF segments")
         offset = self.file.tell()
         self.headers.append(struct.pack("<IIQQQQQQ", 1, 6, offset, address, address,
@@ -152,7 +168,8 @@ def generate(args):
     if not 0 <= args.layer < 36:
         raise ValueError("Layer index must be in [0, 35]")
     arch = load_arch(args.arch)
-    plan = layout(m, batch, seq, past, arch)
+    decode_opt = seq == 1 and not args.baseline
+    plan = layout(m, batch, seq, past, arch, decode_opt)
     nc, offsets = plan["channels"], plan["offsets"]
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -171,7 +188,8 @@ def generate(args):
                      lambda msg: print("  " + msg, flush=True))
     w = Weights(m, args.seed)
     loaded = list(range(m.experts)) if args.all_experts else data["active_experts"]
-    writer = ElfWriter(out / "preload.elf.tmp")
+    writer = ElfWriter(out / "preload.elf.tmp",
+                       512 + 4 * len(loaded) * (nc if decode_opt else 1) + 2 * batch * m.kv_heads)
 
     def add(cid, name, array, extra=0):
         address = arch.dram3d_addr_base + cid * arch.dram3d_node_space + offsets[name] + extra
@@ -189,13 +207,18 @@ def generate(args):
                 padded_bias[local, :valid] = bias[tile * NT:tile * NT + valid]
             add(cid, "b_" + kind, padded_bias)
     for expert in loaded:
-        cid, extra = expert % nc, expert // nc * plan["expert_stride"]
+        extra = (expert if decode_opt else expert // nc) * plan["expert_stride"]
         for kind in ("up", "down"):
             matrix, bias = w.matrix(kind, expert), w.bias(kind, expert)
-            add(cid, "w_" + kind, pack_matrix(matrix, list(range(ceildiv(matrix.shape[1], NT)))), extra)
-            padded_bias = np.zeros(ceildiv(len(bias), NT) * NT, dtype="<f2")
-            padded_bias[:len(bias)] = bias
-            add(cid, "b_" + kind, padded_bias, extra)
+            for cid in range(nc) if decode_opt else (expert % nc,):
+                tiles = list(range((cid - expert) % nc, ceildiv(matrix.shape[1], NT), nc)
+                             if decode_opt else range(ceildiv(matrix.shape[1], NT)))
+                add(cid, "w_" + kind, pack_matrix(matrix, tiles), extra)
+                padded_bias = np.zeros((len(tiles), NT), dtype="<f2")
+                for local, tile in enumerate(tiles):
+                    valid = min(NT, len(bias) - tile * NT)
+                    padded_bias[local, :valid] = bias[tile * NT:tile * NT + valid]
+                add(cid, "b_" + kind, padded_bias, extra)
     for cid in range(nc):
         add(cid, "norm1_weight", w.norm())
         add(cid, "norm2_weight", w.norm(True))
@@ -225,7 +248,8 @@ def generate(args):
                   TOPK=m.topk, QDIM=m.qdim, KVDIM=m.kvdim, QKV=m.qkv,
                   BATCH=batch, SEQ=seq, PAST=past, TOKENS=batch * seq,
                   WINDOW=128 if args.layer % 2 == 0 else 0, LAYER=args.layer,
-                  MT=MT, NT=NT, KT=KT, BC=BC,
+                  MT=MT, NT=NT, KT=KT, BC=BC, DECODE_OPT=int(decode_opt),
+                  WP=plan["weight_panel_k_tiles"],
                   EXPERT_STRIDE=plan["expert_stride"], CACHE_STRIDE=plan["cache_stride"])
     macros.update({"OFF_" + key.upper(): value for key, value in offsets.items()})
     macros.update({"L1_" + key.upper(): value for key, value in plan["l1"].items()})
@@ -272,5 +296,6 @@ if __name__ == "__main__":
     p.add_argument("--layer", type=int, default=1)
     p.add_argument("--seed", type=int, default=19)
     p.add_argument("--all-experts", action="store_true", help="Preload inactive experts too (default: reserve only)")
+    p.add_argument("--baseline", action="store_true", help="Use the original owner-per-expert decode schedule")
     p.add_argument("--plan-only", action="store_true", help="Check capacities and print the mapping without generating weights")
     generate(p.parse_args())

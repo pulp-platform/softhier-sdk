@@ -16,6 +16,10 @@ STAGES = ("norm1", "qkv", "rope_kv_append", "attention", "out_projection",
 
 
 def report(text, manifest):
+    schedule = re.search(r"LLM_SCHEDULE decode_optimized=(\d+)", text)
+    optimized = bool(manifest.get("decode_optimized", False))
+    if (int(schedule[1]) if schedule else 0) != int(optimized):
+        raise ValueError("Binary schedule does not match the generated preload; recompile")
     match = re.search(r"LLM_DRAM3D_PASS batch=(\d+) seq=(\d+) past=(\d+) layer=(\d+) "
                       r"cycles_hi=(\d+) cycles_lo=(\d+) errors=0 checked=(\d+)", text)
     if not match or "MISMATCH" in text or "LLM_ROUTING_FAIL" in text:
@@ -68,7 +72,8 @@ def main():
     except ValueError as error:
         raise SystemExit(f"{error}: {logpath}") from error
     (out / "results.json").write_text(json.dumps(result, indent=2) + "\n")
-    print(f"{result['case']}: PASS, {result['verified_elements']} checks, "
+    schedule = "striped decode" if result.get("decode_optimized") else "baseline"
+    print(f"{result['case']} ({schedule}): PASS, {result['verified_elements']} checks, "
           f"{result['cycles']} cycles ({result['layer_time_us']:.3f} us)")
 
 
