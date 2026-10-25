@@ -14,6 +14,10 @@ GVSOC ?= $(GVSOC_DIR)/install/bin/gvsoc
 OUT ?= $(APP_DIR)/build/$(CASE)-l$(LAYER)-s$(SEED)
 TIMEOUT ?= 3600
 ALL_EXPERTS ?= 0
+VALIDATE ?= 0
+OPT_STEP ?= 25
+OPT_STEPS ?= 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26
+ELF ?= $(OUT)/layer.elf
 EXTRA_CFLAGS ?=
 DECODE_CASES := $(foreach b,1 8 16,$(foreach k,1024 2048 4096,decode_b$(b)_kv$(k)))
 PREFILL_CASES := prefill_s64 prefill_s128
@@ -21,7 +25,7 @@ CASES ?= $(DECODE_CASES) $(PREFILL_CASES)
 GEN_ARGS = --arch $(ARCH) --case $(CASE) --layer $(LAYER) \
            --seed $(SEED) --output $(OUT) $(if $(filter 1,$(ALL_EXPERTS)),--all-experts)
 
-.PHONY: all plan generate compile build run simulate suite
+.PHONY: all plan generate compile build run simulate suite benchmark
 all: build
 
 plan:
@@ -33,21 +37,28 @@ generate:
 
 # compile lets a developer rebuild C without regenerating the large preload.
 compile:
+	@mkdir -p $(dir $(ELF))
 	$(CC) -I $(OUT) -isystem $(RUNTIME)/include -I $(APP_DIR)/sw -T $(OUT)/memory.ld \
 		-nostartfiles -mabi=ilp32d -march=rv32imafdv_zfh_zvfh -mcmodel=medlow \
-		-O3 -g -Wall -Wextra -fno-builtin -fno-tree-vectorize -ffp-contract=off $(EXTRA_CFLAGS) \
+		-O3 -g -Wall -Wextra -fno-builtin -fno-tree-vectorize -ffp-contract=off \
+		-DLLM_VALIDATE=$(VALIDATE) -DLLM_OPT_STEP=$(OPT_STEP) $(EXTRA_CFLAGS) \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
-		$(RUNTIME)/flex_start.s $(APP_DIR)/sw/main.c -o $(OUT)/layer.elf
+		$(RUNTIME)/flex_start.s $(APP_DIR)/sw/main.c -o $(ELF)
 
 build: generate
 	$(MAKE) -f $(APP_DIR)/Makefile compile OUT=$(OUT)
 
 simulate:
 	$(PYTHON) $(APP_DIR)/scripts/run.py --gvsoc $(GVSOC) --arch $(ARCH) \
-		--output $(OUT) --timeout $(TIMEOUT)
+		--output $(OUT) --binary $(ELF) --timeout $(TIMEOUT)
 
 run: build
 	$(MAKE) -f $(APP_DIR)/Makefile simulate OUT=$(OUT)
 
 suite:
 	@set -e; for case in $(CASES); do $(MAKE) -f $(APP_DIR)/Makefile run CASE=$$case; done
+
+# Generate once, then retain each compiled step and its validated measurements.
+benchmark:
+	$(PYTHON) $(APP_DIR)/scripts/benchmark.py --output $(OUT) --arch $(ARCH) \
+		--gvsoc $(GVSOC) --steps $(OPT_STEPS) --timeout $(TIMEOUT)

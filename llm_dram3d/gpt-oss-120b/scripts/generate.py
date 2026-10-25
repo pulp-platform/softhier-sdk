@@ -85,6 +85,18 @@ def layout(m, batch, seq, past, arch):
     # Reused by successive experts on a channel; at most MT routed tokens live.
     reserve("up", MT * 2 * m.intermediate * 2)
     reserve("activation", MT * m.intermediate * 2)
+    striped_stride = 0
+    if seq == 1:
+        # Step 16: retain the original layout and append channel-striped copies.
+        # Both layouts share exactly the same inputs/reference for step recovery.
+        start = cursor
+        for kind, k, n in (("up", m.hidden, 2 * m.intermediate),
+                           ("down", m.intermediate, m.hidden)):
+            tiles = ceildiv(ceildiv(n, NT), nc)
+            reserve("striped_w_" + kind, tiles * ceildiv(k, KT) * KT * NT * 2)
+            reserve("striped_b_" + kind, tiles * NT * 2)
+        striped_stride = cursor - start
+        cursor = start + m.experts * striped_stride
     if cursor > min(arch.dram3d_node_space, 2**31):
         raise ValueError("Layer exceeds the DRAM channel capacity or its aperture")
     max_k = max(m.hidden, m.intermediate, m.qdim)
@@ -99,11 +111,15 @@ def layout(m, batch, seq, past, arch):
                        ("routes", batch * seq * m.topk * 8)):
         l1[name] = lc
         lc = align(lc + size)
+    if seq == 1:
+        for name, size in (("activation", MT * m.intermediate * 2), ("w_next", KT * NT * 2)):
+            l1[name] = lc
+            lc = align(lc + size)
     if lc > arch.cluster_tcdm_base + arch.cluster_tcdm_size:
         raise ValueError("Local buffers exceed TCDM")
     return dict(offsets=offsets, matrices=matrices, fields=fields,
-                expert_stride=stride, cache_stride=cache_stride,
-                channel_bytes=cursor, weight_bytes_per_channel=weight_end,
+                expert_stride=stride, striped_expert_stride=striped_stride, cache_stride=cache_stride,
+                channel_bytes=cursor, weight_bytes_per_channel=weight_end + m.experts * striped_stride,
                 tcdm_bytes=lc - arch.cluster_tcdm_base, l1=l1, channels=nc)
 
 
@@ -112,14 +128,14 @@ class ElfWriter:
     def __init__(self, path):
         self.file = path.open("wb")
         self.headers = []
-        self.file.seek(64 + 2048 * 56)
+        self.file.seek(64 + 16384 * 56)
         self.payload = 0
 
     def add(self, address, array):
         array = np.ascontiguousarray(array)
         if not array.nbytes:
             return
-        if len(self.headers) >= 2048:
+        if len(self.headers) >= 16384:
             raise ValueError("Too many ELF segments")
         offset = self.file.tell()
         self.headers.append(struct.pack("<IIQQQQQQ", 1, 6, offset, address, address,
@@ -196,6 +212,16 @@ def generate(args):
             padded_bias = np.zeros(ceildiv(len(bias), NT) * NT, dtype="<f2")
             padded_bias[:len(bias)] = bias
             add(cid, "b_" + kind, padded_bias, extra)
+            if plan["striped_expert_stride"]:
+                for channel_id in range(nc):
+                    tiles = list(range(channel_id, ceildiv(matrix.shape[1], NT), nc))
+                    packed_bias = np.zeros((len(tiles), NT), dtype="<f2")
+                    for local, tile in enumerate(tiles):
+                        valid = min(NT, len(bias) - tile * NT)
+                        packed_bias[local, :valid] = bias[tile * NT:tile * NT + valid]
+                    striped = expert * plan["striped_expert_stride"]
+                    add(channel_id, "striped_w_" + kind, pack_matrix(matrix, tiles), striped)
+                    add(channel_id, "striped_b_" + kind, packed_bias, striped)
     for cid in range(nc):
         add(cid, "norm1_weight", w.norm())
         add(cid, "norm2_weight", w.norm(True))
@@ -226,7 +252,8 @@ def generate(args):
                   BATCH=batch, SEQ=seq, PAST=past, TOKENS=batch * seq,
                   WINDOW=128 if args.layer % 2 == 0 else 0, LAYER=args.layer,
                   MT=MT, NT=NT, KT=KT, BC=BC,
-                  EXPERT_STRIDE=plan["expert_stride"], CACHE_STRIDE=plan["cache_stride"])
+                  EXPERT_STRIDE=plan["expert_stride"], STRIPED_EXPERT_STRIDE=plan["striped_expert_stride"],
+                  CACHE_STRIDE=plan["cache_stride"])
     macros.update({"OFF_" + key.upper(): value for key, value in offsets.items()})
     macros.update({"L1_" + key.upper(): value for key, value in plan["l1"].items()})
     masks = [sum(1 << (e % 32) for e in loaded if e // 32 == block)
